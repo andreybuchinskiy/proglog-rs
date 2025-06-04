@@ -1,40 +1,22 @@
 use crate::internal::log::config::Config;
+use crate::internal::log::helpers::get_file_path;
 use byteorder::{BigEndian, ByteOrder};
 use memmap2::{MmapMut, MmapOptions};
 use std::fs::File;
-use std::io;
 use std::os::unix::fs::MetadataExt;
-use std::os::unix::io::AsRawFd;
-use std::path::PathBuf;
 
-#[cfg(target_os = "linux")]
-fn get_file_path(file: &File) -> io::Result<PathBuf> {
-    let fd = file.as_raw_fd();
-    let path = format!("/proc/self/fd/{}", fd);
-    let path_str = std::fs::read_link(&path)?;
-    Ok(path_str)
-}
+pub const OFF_WIDTH: u64 = 4;
+pub const POS_WIDTH: u64 = 8;
+pub const ENT_WIDTH: u64 = OFF_WIDTH + POS_WIDTH;
 
-#[cfg(not(target_os = "linux"))]
-fn get_file_path(_file: &File) -> io::Result<PathBuf> {
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "Not supported on this platform",
-    ))
-}
-
-const OFF_WIDTH: u64 = 4;
-const POS_WIDTH: u64 = 8;
-const ENT_WIDTH: u64 = OFF_WIDTH + POS_WIDTH;
-
-struct Index {
-    file: File,
-    mmap: MmapMut,
-    size: u64,
+pub struct Index {
+    pub file: File,
+    pub mmap: MmapMut,
+    pub size: u64,
 }
 
 impl Index {
-    fn new(file: File, config: Config) -> Result<Index, std::io::Error> {
+    pub fn new(file: File, config: Config) -> Result<Index, std::io::Error> {
         let fi = file.metadata()?;
         let size = fi.size();
         file.set_len(config.segment.max_index_bytes)?;
@@ -42,14 +24,14 @@ impl Index {
         Ok(Index { file, mmap, size })
     }
 
-    fn close(&self) -> Result<(), std::io::Error> {
+    pub fn close(&self) -> Result<(), std::io::Error> {
         self.mmap.flush()?;
         self.file.set_len(self.size)?;
         self.file.sync_all()?;
         Ok(())
     }
 
-    fn read(&self, inp: i64) -> Result<(u32, u64), std::io::ErrorKind> {
+    pub fn read(&self, inp: i64) -> Result<(u32, u64), std::io::ErrorKind> {
         if self.size == 0 {
             return Err(std::io::ErrorKind::UnexpectedEof);
         }
@@ -70,7 +52,7 @@ impl Index {
         Ok((out as u32, pos))
     }
 
-    fn write(&mut self, off: u32, pos: u64) -> Result<(), std::io::ErrorKind> {
+    pub fn write(&mut self, off: u32, pos: u64) -> Result<(), std::io::ErrorKind> {
         if (self.mmap.len() as u64) < self.size + ENT_WIDTH {
             return Err(std::io::ErrorKind::UnexpectedEof);
         }
@@ -87,7 +69,7 @@ impl Index {
         Ok(())
     }
 
-    fn name(&self) -> String {
+    pub fn name(&self) -> String {
         let file = get_file_path(&self.file).unwrap();
         file.to_string_lossy().into_owned()
     }
@@ -96,10 +78,11 @@ impl Index {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::internal::log::config::Segment;
+    use crate::internal::log::config::SegmentConfig;
     use assert2::check;
     use assert2::let_assert;
     use std::fs::OpenOptions;
+    use std::io;
     use tempfile::NamedTempFile;
 
     #[test]
@@ -113,10 +96,10 @@ mod tests {
             .open(&path)?;
 
         let config = Config {
-            segment: Segment {
+            segment: SegmentConfig {
                 max_index_bytes: 1024,
                 max_store_bytes: 1024,
-                inital_offset: 1,
+                initial_offset: 1,
             },
         };
 

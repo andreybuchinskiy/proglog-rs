@@ -1,21 +1,21 @@
+use crate::internal::log::helpers::get_file_path;
+use byteorder::BigEndian;
+use byteorder::WriteBytesExt;
 use std::fs::{File, Metadata};
 use std::io::{self, BufWriter, Seek, SeekFrom};
 use std::io::{Read, Write};
-// use std::os::unix::fs::FileExt;
-use byteorder::BigEndian;
-use byteorder::WriteBytesExt;
 use std::sync::Mutex;
 
 const LEN_WIDTH: usize = 8;
 
-struct Store {
-    file: File,
-    buf: Mutex<BufWriter<File>>,
-    size: u64,
+pub struct Store {
+    pub file: File,
+    pub buf: Mutex<BufWriter<File>>,
+    pub size: u64,
 }
 
 impl Store {
-    fn new_store(file: File) -> io::Result<Store> {
+    pub fn new_store(file: File) -> io::Result<Store> {
         let metadata: Metadata = file.metadata()?;
         let size: u64 = metadata.len();
         let new_file = file.try_clone()?;
@@ -27,11 +27,11 @@ impl Store {
         })
     }
 
-    fn append(&mut self, p: &[u8]) -> Result<(u64, u64), Box<dyn std::error::Error + '_>> {
+    pub fn append(&mut self, p: &[u8]) -> Result<(u64, u64), std::io::Error> {
         let mut buf = self
             .buf
             .lock()
-            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+            .map_err(|e| io::Error::other(e.to_string()))?;
         let pos = self.size;
         buf.write_u64::<BigEndian>(p.len() as u64)?;
         let w = buf.write(p)?;
@@ -41,11 +41,11 @@ impl Store {
         Ok((total_written as u64, pos))
     }
 
-    fn read(&mut self, pos: u64) -> Result<Vec<u8>, Box<dyn std::error::Error + '_>> {
+    pub fn read(&mut self, pos: u64) -> Result<Vec<u8>, std::io::Error> {
         let mut buf = self
             .buf
             .lock()
-            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+            .map_err(|e| io::Error::other(e.to_string()))?;
         let mut size_buf = [0u8; LEN_WIDTH];
         buf.seek(SeekFrom::Start(pos))?;
         self.file.read_exact(&mut size_buf)?;
@@ -70,7 +70,7 @@ impl Store {
         Ok(bytes_read)
     }
 
-    fn close(&mut self) -> io::Result<()> {
+    pub fn close(&mut self) -> io::Result<()> {
         let mut buf = self
             .buf
             .lock()
@@ -78,6 +78,11 @@ impl Store {
         buf.flush()?;
         self.file.sync_all()?;
         Ok(())
+    }
+
+    pub fn name(&self) -> String {
+        let file = get_file_path(&self.file).unwrap();
+        file.to_string_lossy().into_owned()
     }
 }
 
