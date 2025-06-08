@@ -1,4 +1,5 @@
 use crate::internal::server::log::{Log, Record};
+use anyhow::Result;
 use axum::{
     extract::State,
     http::StatusCode,
@@ -68,7 +69,7 @@ struct ConsumeResponse {
     record: Record,
 }
 
-pub async fn new_http_server(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn new_http_server(addr: &str) -> Result<()> {
     let http_srv = Arc::new(HttpServer::new());
 
     let app = Router::new()
@@ -86,6 +87,3 @@ pub async fn new_http_server(addr: &str) -> Result<(), Box<dyn std::error::Error
 
     Ok(())
 }
-
-
-

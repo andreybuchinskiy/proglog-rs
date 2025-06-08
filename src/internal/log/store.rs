@@ -1,4 +1,5 @@
 use crate::internal::log::helpers::get_file_path;
+use anyhow::{anyhow, Result};
 use byteorder::BigEndian;
 use byteorder::WriteBytesExt;
 use std::fs::{File, Metadata};
@@ -6,7 +7,7 @@ use std::io::{self, BufWriter, Seek, SeekFrom};
 use std::io::{Read, Write};
 use std::sync::Mutex;
 
-const LEN_WIDTH: usize = 8;
+pub const LEN_WIDTH: usize = 8;
 
 pub struct Store {
     pub file: File,
@@ -27,11 +28,8 @@ impl Store {
         })
     }
 
-    pub fn append(&mut self, p: &[u8]) -> Result<(u64, u64), std::io::Error> {
-        let mut buf = self
-            .buf
-            .lock()
-            .map_err(|e| io::Error::other(e.to_string()))?;
+    pub fn append(&mut self, p: &[u8]) -> Result<(u64, u64)> {
+        let mut buf = self.buf.lock().map_err(|e| anyhow!(e.to_string()))?;
         let pos = self.size;
         buf.write_u64::<BigEndian>(p.len() as u64)?;
         let w = buf.write(p)?;
@@ -41,11 +39,8 @@ impl Store {
         Ok((total_written as u64, pos))
     }
 
-    pub fn read(&mut self, pos: u64) -> Result<Vec<u8>, std::io::Error> {
-        let mut buf = self
-            .buf
-            .lock()
-            .map_err(|e| io::Error::other(e.to_string()))?;
+    pub fn read(&mut self, pos: u64) -> Result<Vec<u8>> {
+        let mut buf = self.buf.lock().map_err(|e| anyhow!(e.to_string()))?;
         let mut size_buf = [0u8; LEN_WIDTH];
         buf.seek(SeekFrom::Start(pos))?;
         self.file.read_exact(&mut size_buf)?;
@@ -58,23 +53,17 @@ impl Store {
         Ok(data)
     }
 
-    fn read_at(&mut self, p: &mut [u8], off: u64) -> io::Result<usize> {
-        let mut buf = self
-            .buf
-            .lock()
-            .map_err(|e| io::Error::other(e.to_string()))?;
+    pub fn read_at(&mut self, p: &mut [u8], off: u64) -> Result<usize> {
+        let mut buf = self.buf.lock().map_err(|e| anyhow!(e.to_string()))?;
         buf.flush()?;
-        self.file.seek(SeekFrom::Start(off))?;
-        let bytes_read = self.file.read(p)?;
-
+        let mut file = &self.file;
+        let file_size = file.seek(SeekFrom::Start(off))?;
+        let bytes_read = file.read(p)?;
         Ok(bytes_read)
     }
 
-    pub fn close(&mut self) -> io::Result<()> {
-        let mut buf = self
-            .buf
-            .lock()
-            .map_err(|e| io::Error::other(e.to_string()))?;
+    pub fn close(&mut self) -> Result<()> {
+        let mut buf = self.buf.lock().map_err(|e| anyhow!(e.to_string()))?;
         buf.flush()?;
         self.file.sync_all()?;
         Ok(())
@@ -89,6 +78,7 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::{Store, LEN_WIDTH};
+    use anyhow::{anyhow, Result};
     use std::fs::File;
     use std::fs::OpenOptions;
     use std::io::{self};
@@ -98,7 +88,7 @@ mod tests {
     const WIDTH: u64 = (WRITE.len() as u64) + LEN_WIDTH as u64;
 
     #[test]
-    fn test_store_append_read() -> io::Result<()> {
+    fn test_store_append_read() -> Result<()> {
         let temp_file = NamedTempFile::new()?;
         let file_path = temp_file.path().to_path_buf();
 
@@ -121,7 +111,7 @@ mod tests {
     }
 
     #[test]
-    fn test_store_close() -> io::Result<()> {
+    fn test_store_close() -> Result<()> {
         let temp_file = NamedTempFile::new()?;
         let file_path = temp_file.path().to_path_buf();
 
@@ -133,9 +123,7 @@ mod tests {
             .open(&file_path)?;
         let mut store = Store::new_store(file)?;
 
-        let (_, _) = store
-            .append(WRITE)
-            .map_err(|e| io::Error::other(e.to_string()))?;
+        let (_, _) = store.append(WRITE).map_err(|e| anyhow!(e.to_string()))?;
 
         let (before_file, before_size) = open_file(&file_path)?;
 
@@ -156,7 +144,7 @@ mod tests {
         Ok(())
     }
 
-    fn open_file(name: &std::path::Path) -> io::Result<(File, i64)> {
+    fn open_file(name: &std::path::Path) -> Result<(File, i64)> {
         let file = OpenOptions::new()
             .read(true)
             .append(true)
@@ -167,22 +155,20 @@ mod tests {
         Ok((file, size))
     }
 
-    fn test_append(store: &mut Store) -> io::Result<()> {
-        let (n, pos) = store
-            .append(WRITE)
-            .map_err(|e| io::Error::other(e.to_string()))?;
+    fn test_append(store: &mut Store) -> Result<()> {
+        let (n, pos) = store.append(WRITE).map_err(|e| anyhow!(e.to_string()))?;
         assert_eq!(n, WIDTH, "expected {} bytes written, got {}", WIDTH, n);
         assert_eq!(pos, 0, "expected position 0, got {}", pos);
         Ok(())
     }
 
-    fn test_read(store: &mut Store) -> io::Result<()> {
+    fn test_read(store: &mut Store) -> Result<()> {
         let data = store.read(0).map_err(|e| io::Error::other(e.to_string()))?;
         assert_eq!(data, WRITE, "expected read data to match {:?}", WRITE);
         Ok(())
     }
 
-    fn test_read_at(store: &mut Store) -> io::Result<()> {
+    fn test_read_at(store: &mut Store) -> Result<()> {
         let mut buffer = vec![0u8; WRITE.len()];
         let bytes_read = store.read_at(&mut buffer, LEN_WIDTH as u64)?;
         assert_eq!(

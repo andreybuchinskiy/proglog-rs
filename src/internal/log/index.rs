@@ -1,5 +1,6 @@
 use crate::internal::log::config::Config;
 use crate::internal::log::helpers::get_file_path;
+use anyhow::{anyhow, Result};
 use byteorder::{BigEndian, ByteOrder};
 use memmap2::{MmapMut, MmapOptions};
 use std::fs::File;
@@ -16,7 +17,7 @@ pub struct Index {
 }
 
 impl Index {
-    pub fn new(file: File, config: Config) -> Result<Index, std::io::Error> {
+    pub fn new(file: File, config: Config) -> Result<Index> {
         let fi = file.metadata()?;
         let size = fi.size();
         file.set_len(config.segment.max_index_bytes)?;
@@ -24,37 +25,36 @@ impl Index {
         Ok(Index { file, mmap, size })
     }
 
-    pub fn close(&self) -> Result<(), std::io::Error> {
+    pub fn close(&self) -> Result<()> {
         self.mmap.flush()?;
         self.file.set_len(self.size)?;
         self.file.sync_all()?;
         Ok(())
     }
 
-    pub fn read(&self, inp: i64) -> Result<(u32, u64), std::io::ErrorKind> {
+    pub fn read(&self, inp: i64) -> Result<(u32, u64)> {
         if self.size == 0 {
-            return Err(std::io::ErrorKind::UnexpectedEof);
+            return Err(anyhow!("Unexpected EOF"));
         }
-        let mut out: u32 = 0;
-        if inp == -1 {
-            out = (self.size as u32 / ENT_WIDTH as u32) - 1;
+        let mut out = if inp == -1 {
+            (self.size as u32 / ENT_WIDTH as u32) - 1
         } else {
-            out = inp as u32;
-        }
-        let mut pos = out as u64 * ENT_WIDTH;
+            inp as u32
+        };
+        let mut pos = (out as u64) * ENT_WIDTH;
         if self.size < pos + ENT_WIDTH {
-            return Err(std::io::ErrorKind::UnexpectedEof);
+            return Err(anyhow!("Unexpected EOF"));
         }
         out = BigEndian::read_u32(&self.mmap[pos as usize..pos as usize + OFF_WIDTH as usize]);
         pos = BigEndian::read_u64(
             &self.mmap[pos as usize + OFF_WIDTH as usize..pos as usize + ENT_WIDTH as usize],
         );
-        Ok((out as u32, pos))
+        Ok((out, pos))
     }
 
-    pub fn write(&mut self, off: u32, pos: u64) -> Result<(), std::io::ErrorKind> {
+    pub fn write(&mut self, off: u32, pos: u64) -> Result<()> {
         if (self.mmap.len() as u64) < self.size + ENT_WIDTH {
-            return Err(std::io::ErrorKind::UnexpectedEof);
+            return Err(anyhow!("Unexpected EOF"));
         }
         BigEndian::write_u32(
             &mut self.mmap[self.size as usize..self.size as usize + OFF_WIDTH as usize],
@@ -79,14 +79,14 @@ impl Index {
 mod tests {
     use super::*;
     use crate::internal::log::config::SegmentConfig;
+    use anyhow::Result;
     use assert2::check;
     use assert2::let_assert;
     use std::fs::OpenOptions;
-    use std::io;
     use tempfile::NamedTempFile;
 
     #[test]
-    fn test_index() -> io::Result<()> {
+    fn test_index() -> Result<()> {
         let temp_file = NamedTempFile::new()?;
         let path = temp_file.path().to_path_buf();
         let file = OpenOptions::new()
@@ -126,7 +126,7 @@ mod tests {
             Err(err) = idx.read(entries.len() as i64),
             "Reading past entries should fail"
         );
-        check!(err == io::ErrorKind::UnexpectedEof, "Error should be EOF");
+        check!(err.to_string() == "Unexpected EOF", "Error should be EOF");
 
         check!(idx.close().is_ok(), "Close should succeed");
 

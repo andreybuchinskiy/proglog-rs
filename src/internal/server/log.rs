@@ -1,3 +1,4 @@
+use anyhow::{anyhow, Result};
 use base64::{engine::general_purpose, Engine as _};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::sync::Mutex;
@@ -44,11 +45,8 @@ impl Default for Log {
 impl std::error::Error for OffsetNotFound {}
 
 impl Log {
-    pub fn append(&self, record: Record) -> Result<u64, Box<dyn std::error::Error + '_>> {
-        let mut records = self
-            .records
-            .lock()
-            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+    pub fn append(&self, record: Record) -> Result<u64> {
+        let mut records = self.records.lock().map_err(|e| anyhow!(e.to_string()))?;
         let offset = records.len() as u64;
         let mut record = record;
         record.offset = offset;
@@ -56,13 +54,10 @@ impl Log {
         Ok(offset)
     }
 
-    pub fn read(&self, offset: u64) -> Result<Record, Box<dyn std::error::Error + '_>> {
-        let records = self
-            .records
-            .lock()
-            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+    pub fn read(&self, offset: u64) -> Result<Record> {
+        let records = self.records.lock().map_err(|e| anyhow!(e.to_string()))?;
         if offset >= records.len() as u64 {
-            return Err(Box::new(OffsetNotFound));
+            return Err(OffsetNotFound.into());
         }
         Ok(records[offset as usize].clone())
     }

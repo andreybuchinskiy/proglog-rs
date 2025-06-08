@@ -2,26 +2,27 @@ use crate::api::v1::Record;
 use crate::internal::log::config::Config;
 use crate::internal::log::index::Index;
 use crate::internal::log::store::Store;
+use anyhow::{anyhow, Result};
 use std::fs::{remove_file, OpenOptions};
-use std::io;
+use std::sync::{Arc, Mutex};
 
 pub struct Segment {
-    store: Store,
-    index: Index,
-    base_offset: u64,
-    next_offset: u64,
-    config: Config,
+    pub store: Arc<Mutex<Store>>,
+    pub index: Index,
+    pub base_offset: u64,
+    pub next_offset: u64,
+    pub config: Config,
 }
 
 impl Segment {
-    fn new(dir: &str, base_offset: u64, config: Config) -> Result<Segment, io::Error> {
+    pub fn new(dir: &str, base_offset: u64, config: Config) -> Result<Segment> {
         let store_path = format!("{}/{}.store", dir, base_offset);
         let store_file = OpenOptions::new()
             .read(true)
             .append(true)
             .create(true)
             .open(store_path)?;
-        let store = Store::new_store(store_file)?;
+        let store = Arc::new(Mutex::new(Store::new_store(store_file)?));
         let index_path = format!("{}/{}.index", dir, base_offset);
         let index_file = OpenOptions::new()
             .read(true)
@@ -29,10 +30,9 @@ impl Segment {
             .create(true)
             .open(index_path)?;
         let index = Index::new(index_file, config.clone())?;
-        let mut next_offset: u64 = 0;
-        match index.read(-1) {
-            Ok((off, _)) => next_offset = base_offset + off as u64 + 1,
-            Err(_) => next_offset = base_offset,
+        let next_offset = match index.read(-1) {
+            Ok((off, _)) => base_offset + off as u64,
+            Err(_) => base_offset,
         };
         Ok(Segment {
             store,
@@ -43,44 +43,61 @@ impl Segment {
         })
     }
 
-    fn append(&mut self, mut record: Record) -> Result<u64, io::Error> {
+    pub fn append(&mut self, mut record: Record) -> Result<u64> {
         let cur = self.next_offset;
         record.offset = cur;
         let p = serde_json::to_vec(&record)?;
-        let (_, pos) = self.store.append(&p)?;
+        let (_, pos) = self
+            .store
+            .lock()
+            .map_err(|e| anyhow!(e.to_string()))?
+            .append(&p)?;
         let off: u32 = self.next_offset as u32 - self.base_offset as u32;
         self.index.write(off, pos)?;
         self.next_offset += 1;
         Ok(cur)
     }
 
-    fn read(&mut self, off: u64) -> Result<Record, io::Error> {
+    pub fn read(&mut self, off: u64) -> Result<Record> {
         let offset = off - self.base_offset;
         let (_, pos) = self.index.read(offset as i64)?;
-        let p = self.store.read(pos)?;
+        let p = self
+            .store
+            .lock()
+            .map_err(|e| anyhow!(e.to_string()))?
+            .read(pos)?;
         let record: Record = serde_json::from_slice(&p)?;
         Ok(record)
     }
 
-    fn is_maxed(&self) -> bool {
-        self.store.size >= self.config.segment.max_store_bytes
-            || self.index.size >= self.config.segment.max_index_bytes
+    pub fn is_maxed(&self) -> Result<bool> {
+        let store = self.store.lock().map_err(|e| anyhow!(e.to_string()))?;
+        Ok(store.size >= self.config.segment.max_store_bytes
+            || self.index.size >= self.config.segment.max_index_bytes)
     }
 
-    fn remove(&mut self) -> Result<(), io::Error> {
+    pub fn remove(&mut self) -> Result<()> {
         self.close()?;
         remove_file(self.index.name())?;
-        remove_file(self.store.name())?;
+        remove_file(
+            self.store
+                .lock()
+                .map_err(|e| anyhow!(e.to_string()))?
+                .name(),
+        )?;
         Ok(())
     }
 
-    fn close(&mut self) -> Result<(), io::Error> {
+    pub fn close(&mut self) -> Result<()> {
         self.index.close()?;
-        self.store.close()?;
+        self.store
+            .lock()
+            .map_err(|e| anyhow!(e.to_string()))?
+            .close()?;
         Ok(())
     }
 
-    fn nearest_multiple(&self, j: u64, k: u64) -> u64 {
+    pub fn nearest_multiple(&self, j: u64, k: u64) -> u64 {
         (j / k) * k
     }
 }
@@ -90,13 +107,13 @@ mod tests {
     use super::{Config, Record, Segment};
     use crate::internal::log::config::SegmentConfig;
     use crate::internal::log::index::ENT_WIDTH;
+    use anyhow::Result;
     use assert2::check;
     use assert2::let_assert;
-    use std::io;
     use tempfile::tempdir;
 
     #[test]
-    fn test_segment() -> io::Result<()> {
+    fn test_segment() -> Result<()> {
         let temp_dir = tempdir()?;
         let file_path = temp_dir.path().to_path_buf();
         let want = Record {
@@ -112,7 +129,7 @@ mod tests {
         };
         let mut segment = Segment::new(&file_path.to_string_lossy(), 16, config.clone())?;
         check!(16 == segment.next_offset, "Next offset should be 16");
-        check!(segment.is_maxed() == false, "is_maxed should be false");
+        check!(segment.is_maxed()? == false, "is_maxed should be false");
         let mut i = 0;
         while i < 3 {
             let off = segment.append(want.clone())?;
@@ -130,17 +147,17 @@ mod tests {
             "Writing a third time should fail"
         );
 
-        check!(segment.is_maxed() == true, "Segment should be maxed");
+        check!(segment.is_maxed()? == true, "Segment should be maxed");
 
         config.segment.max_store_bytes = want.value.len() as u64 * 3;
         config.segment.max_index_bytes = 1024;
 
         segment = Segment::new(&file_path.to_string_lossy(), 16, config.clone())?;
-        check!(segment.is_maxed() == true, "segment should be maxed");
+        check!(segment.is_maxed()? == true, "segment should be maxed");
 
         segment.remove()?;
         segment = Segment::new(&file_path.to_string_lossy(), 16, config.clone())?;
-        check!(segment.is_maxed() == false, "segment should not be maxed");
+        check!(segment.is_maxed()? == false, "segment should not be maxed");
 
         Ok(())
     }
