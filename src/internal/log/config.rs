@@ -1,9 +1,9 @@
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Config {
     pub segment: SegmentConfig,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct SegmentConfig {
     pub max_store_bytes: u64,
     pub max_index_bytes: u64,

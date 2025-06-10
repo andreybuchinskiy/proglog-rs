@@ -4,7 +4,7 @@ use anyhow::Result;
 
 pub mod api {
     pub mod v1 {
-        include!(concat!(env!("OUT_DIR"), "/log.v1.rs"));
+        tonic::include_proto!("log.v1");
     }
 }
 

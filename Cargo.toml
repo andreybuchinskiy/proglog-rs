@@ -17,11 +17,15 @@ byteorder = "1.5.0"
 tempfile = "3.20.0"
 memmap2 = "0.9.5"
 prost-helper = "0.1"
+async-trait = "0.1.88"
+tokio-stream = "0.1.17"
 
 [build-dependencies]
 tonic-build = "0.13.1"
 prost-build = "0.13.5"
 prost-serde = "0.1"
+serde = { version = "1.0.219", features = ["derive"] }
 
 [dev-dependencies]
 assert2 = "0.3"
+tonic-mock = "0.4.0"

@@ -57,7 +57,7 @@ impl Store {
         let mut buf = self.buf.lock().map_err(|e| anyhow!(e.to_string()))?;
         buf.flush()?;
         let mut file = &self.file;
-        let file_size = file.seek(SeekFrom::Start(off))?;
+        file.seek(SeekFrom::Start(off))?;
         let bytes_read = file.read(p)?;
         Ok(bytes_read)
     }
