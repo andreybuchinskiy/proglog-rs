@@ -6,8 +6,8 @@ use crate::api::v1::{ConsumeRequest, ConsumeResponse, ProduceRequest, ProduceRes
 use async_trait::async_trait;
 use std::sync::Arc;
 use tokio::sync::mpsc;
+use tokio::sync::Mutex;
 use tokio_stream::{wrappers::ReceiverStream, StreamExt};
-use tonic::codegen::BoxStream as TonicBoxStream;
 use tonic::Streaming;
 use tonic::{transport::server::Router, transport::Server, Request, Response, Status};
 
@@ -24,21 +24,21 @@ impl LogServerService {
 
 #[derive(Clone)]
 struct ServerConfig {
-    pub commit_log: Arc<dyn CommitLog>,
+    pub commit_log: Arc<Mutex<dyn CommitLog>>,
 }
 
 impl ServerConfig {
     pub fn new(commit_log: impl CommitLog + 'static) -> ServerConfig {
         ServerConfig {
-            commit_log: Arc::new(commit_log),
+            commit_log: Arc::new(Mutex::new(commit_log)),
         }
     }
 }
 
 #[async_trait]
-trait CommitLog: Send + Sync + 'static {
-    async fn append(&self, record: Record) -> anyhow::Result<u64>;
-    async fn read(&self, offset: u64) -> anyhow::Result<Record>;
+pub trait CommitLog: Send + Sync + 'static {
+    async fn append(&mut self, record: Record) -> anyhow::Result<u64>;
+    async fn read(&mut self, offset: u64) -> anyhow::Result<Record>;
 }
 
 pub async fn new_grpc_server(commit_log: impl CommitLog + 'static) -> anyhow::Result<Router> {
@@ -56,7 +56,14 @@ impl Log for LogServerService {
         request: Request<ProduceRequest>,
     ) -> Result<Response<ProduceResponse>, Status> {
         if let Some(record) = request.into_inner().record {
-            let offset = self.config.commit_log.append(record).await.unwrap();
+            let offset = self
+                .config
+                .commit_log
+                .lock()
+                .await
+                .append(record)
+                .await
+                .unwrap();
             Ok(Response::new(ProduceResponse { offset }))
         } else {
             Err(Status::new(
@@ -73,6 +80,8 @@ impl Log for LogServerService {
         let record = self
             .config
             .commit_log
+            .lock()
+            .await
             .read(request.into_inner().offset)
             .await;
         match record {
@@ -155,3 +164,6 @@ impl Log for LogServerService {
         Ok(Response::new(ReceiverStream::new(rx)))
     }
 }
+
+#[cfg(test)]
+mod tests {}

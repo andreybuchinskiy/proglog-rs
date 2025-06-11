@@ -1,7 +1,7 @@
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut config = prost_build::Config::new();
+    config.type_attribute(".", "#[derive(serde::Serialize, serde::Deserialize)]");
     config.type_attribute(".", "#[serde(rename_all = \"snake_case\")]");
-    config.message_attribute(".", "#[derive(serde::Serialize, serde::Deserialize)]");
 
     tonic_build::configure()
         .build_server(true)

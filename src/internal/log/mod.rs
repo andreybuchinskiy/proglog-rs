@@ -5,11 +5,15 @@ pub mod segment;
 pub mod store;
 
 use anyhow::{anyhow, Result};
+use async_trait::async_trait;
 use std::fs;
 use std::str::FromStr;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::sync::Mutex as SyncMutex;
+use tokio::sync::Mutex;
 
 use crate::api::v1::Record;
+use crate::internal::server::CommitLog;
 
 use config::Config;
 use segment::Segment;
@@ -22,8 +26,44 @@ struct Log {
     segments: Vec<Arc<Mutex<Segment>>>,
 }
 
+#[async_trait]
+impl CommitLog for Log {
+    async fn append(&mut self, record: Record) -> Result<u64> {
+        match &mut self.active_segment {
+            Some(active_segment) => {
+                let cloned_segment = active_segment.clone();
+                let mut writeable_segment = cloned_segment.lock().await;
+                let off = writeable_segment.append(record)?;
+                if writeable_segment.is_maxed()? {
+                    self.new_segment(off + 1).await?;
+                }
+                Ok(off)
+            }
+            None => Err(anyhow!("No active segment")),
+        }
+    }
+    async fn read(&mut self, off: u64) -> Result<Record> {
+        let mut segment = None;
+        for s in self.segments.iter_mut() {
+            let seg = s.lock().await;
+            if seg.base_offset <= off && off < seg.next_offset {
+                segment = Some(s.clone())
+            }
+        }
+        match segment {
+            Some(s) => {
+                let cloned_segment = s.clone();
+                let mut seg = cloned_segment.lock().await;
+                Ok(seg.read(off)?)
+            }
+            None => Err(anyhow!("offset out of range: {}", off)),
+        }
+    }
+}
+
+// #[async_trait]
 impl Log {
-    pub fn new(dir: String, mut config: Config) -> Result<Log> {
+    pub async fn new(dir: String, mut config: Config) -> Result<Log> {
         if config.segment.max_store_bytes == 0 {
             config.segment.max_store_bytes = 1024;
         }
@@ -36,12 +76,12 @@ impl Log {
             active_segment: None,
             segments: Vec::new(),
         };
-        log.setup()?;
+        log.setup().await?;
 
         Ok(log)
     }
 
-    pub fn setup(&mut self) -> Result<()> {
+    pub async fn setup(&mut self) -> Result<()> {
         let entries = fs::read_dir(&self.dir)?;
         let mut base_offsets: Vec<u64> = entries
             .filter_map(|entry| {
@@ -55,76 +95,73 @@ impl Log {
         base_offsets.sort();
 
         for i in (0..base_offsets.len()).step_by(2) {
-            self.new_segment(base_offsets[i])?;
+            self.new_segment(base_offsets[i]).await?;
         }
 
         if self.segments.is_empty() {
-            self.new_segment(self.config.segment.initial_offset)?;
+            self.new_segment(self.config.segment.initial_offset).await?;
         }
 
         Ok(())
     }
 
-    pub fn append(&mut self, record: Record) -> Result<u64> {
-        match &mut self.active_segment {
-            Some(active_segment) => {
-                let cloned_segment = active_segment.clone();
-                let mut writeable_segment = cloned_segment.lock().map_err(|e| {
-                    anyhow!("Failed to obtain write lock for active segment: {}", e)
-                })?;
-                let off = writeable_segment.append(record)?;
-                if writeable_segment.is_maxed()? {
-                    self.new_segment(off + 1)?;
-                }
-                Ok(off)
-            }
-            None => Err(anyhow!("No active segment")),
-        }
-    }
+    // pub async fn append(&mut self, record: Record) -> Result<u64> {
+    //     match &mut self.active_segment {
+    //         Some(active_segment) => {
+    //             let cloned_segment = active_segment.clone();
+    //             let mut writeable_segment = cloned_segment.lock().map_err(|e| {
+    //                 anyhow!("Failed to obtain write lock for active segment: {}", e)
+    //             })?;
+    //             let off = writeable_segment.append(record)?;
+    //             if writeable_segment.is_maxed()? {
+    //                 self.new_segment(off + 1)?;
+    //             }
+    //             Ok(off)
+    //         }
+    //         None => Err(anyhow!("No active segment")),
+    //     }
+    // }
 
-    pub fn read(&mut self, off: u64) -> Result<Record> {
-        let segment = self.segments.iter_mut().find(|s| {
-            let segment = s.lock().unwrap();
-            segment.base_offset <= off && off < segment.next_offset
-        });
-        match segment {
-            Some(s) => {
-                let cloned_segment = s.clone();
-                let mut seg = cloned_segment.lock().map_err(|e| anyhow!(e.to_string()))?;
-                Ok(seg.read(off)?)
-            }
-            None => Err(anyhow!("offset out of range: {}", off)),
-        }
-    }
+    // pub async fn read(&mut self, off: u64) -> Result<Record> {
+    //     let segment = self.segments.iter_mut().find(|s| {
+    //         let segment = s.lock().unwrap();
+    //         segment.base_offset <= off && off < segment.next_offset
+    //     });
+    //     match segment {
+    //         Some(s) => {
+    //             let cloned_segment = s.clone();
+    //             let mut seg = cloned_segment.lock().map_err(|e| anyhow!(e.to_string()))?;
+    //             Ok(seg.read(off)?)
+    //         }
+    //         None => Err(anyhow!("offset out of range: {}", off)),
+    //     }
+    // }
 
-    pub fn close(&mut self) -> Result<()> {
-        self.segments.iter_mut().for_each(|s| {
-            s.lock().unwrap().close().unwrap();
-        });
+    pub async fn close(&mut self) -> Result<()> {
+        for s in self.segments.iter_mut() {
+            s.lock().await.close().map_err(|e| anyhow!(e.to_string()))?
+        }
         Ok(())
     }
 
-    pub fn remove(&mut self) -> Result<()> {
-        self.close()?;
+    pub async fn remove(&mut self) -> Result<()> {
+        self.close().await?;
         Ok(fs::remove_dir(&self.dir)?)
     }
 
-    pub fn reset(&mut self) -> Result<()> {
-        self.remove()?;
-        self.setup()
+    pub async fn reset(&mut self) -> Result<()> {
+        self.remove().await?;
+        self.setup().await
     }
 
-    pub fn lowest_offset(&mut self) -> Result<u64> {
-        Ok(self.segments[0]
-            .lock()
-            .map_err(|e| anyhow!(e.to_string()))?
-            .base_offset)
+    pub async fn lowest_offset(&mut self) -> Result<u64> {
+        Ok(self.segments[0].lock().await.base_offset)
     }
 
-    pub fn highest_offset(&mut self) -> Result<u64> {
+    pub async fn highest_offset(&mut self) -> Result<u64> {
         let off = self.segments[self.segments.len() - 1]
             .lock()
-            .map_err(|e| anyhow!(e.to_string()))?
+            .await
             .next_offset;
         if off == 0 {
             Ok(0)
@@ -133,22 +170,21 @@ impl Log {
         }
     }
 
-    pub fn truncate(&mut self, lowest: u64) -> Result<()> {
-        self.segments.retain_mut(|s| {
-            let mut segment = s.lock().unwrap();
-            if segment.next_offset <= lowest + 1 {
-                if segment.remove().is_err() {
-                    return false;
-                }
-                false
+    pub async fn truncate(&mut self, lowest: u64) -> Result<()> {
+        let mut segments = Vec::new();
+        for s in self.segments.iter_mut() {
+            let mut seg = s.lock().await;
+            if seg.next_offset <= lowest + 1 {
+                seg.remove()?
             } else {
-                true
+                segments.push(s.clone());
             }
-        });
+        }
+        self.segments = segments;
         Ok(())
     }
 
-    pub fn new_segment(&mut self, off: u64) -> Result<()> {
+    pub async fn new_segment(&mut self, off: u64) -> Result<()> {
         let segment = Arc::new(Mutex::new(Segment::new(
             &self.dir,
             off,
@@ -159,23 +195,23 @@ impl Log {
         Ok(())
     }
 
-    pub fn reader(&mut self) -> Result<MultiReader> {
-        let readers: Vec<OriginReader> = self
-            .segments
-            .iter_mut()
-            .map(|s| OriginReader::new(s.lock().unwrap().store.clone(), 0))
-            .collect::<Vec<OriginReader>>();
+    pub async fn reader(&mut self) -> Result<MultiReader> {
+        let mut readers = Vec::new();
+        for s in self.segments.iter_mut() {
+            let seg = s.lock().await;
+            readers.push(OriginReader::new(seg.store.clone(), 0));
+        }
         Ok(MultiReader::new(readers))
     }
 }
 
 struct OriginReader {
-    store: Arc<Mutex<Store>>,
+    store: Arc<SyncMutex<Store>>,
     off: u64,
 }
 
 impl OriginReader {
-    fn new(store: Arc<Mutex<Store>>, off: u64) -> OriginReader {
+    fn new(store: Arc<SyncMutex<Store>>, off: u64) -> OriginReader {
         OriginReader { store, off }
     }
     fn read(&mut self, p: &mut [u8]) -> Result<usize> {
@@ -211,11 +247,12 @@ mod tests {
     use super::config::{Config, SegmentConfig};
     use super::{Log, Record};
     use crate::internal::log::store::LEN_WIDTH;
+    use crate::internal::server::CommitLog;
     use anyhow::Result;
     use assert2::let_assert;
     use tempfile::{tempdir, TempDir};
 
-    fn create_log() -> Result<(Log, TempDir)> {
+    async fn create_log() -> Result<(Log, TempDir)> {
         let temp_dir = tempdir()?;
         let dir = temp_dir.path().to_path_buf();
         let config = Config {
@@ -225,7 +262,7 @@ mod tests {
                 max_index_bytes: 0,
             },
         };
-        let log = Log::new((dir.to_string_lossy()).to_string(), config)?;
+        let log = Log::new((dir.to_string_lossy()).to_string(), config).await?;
         Ok((log, temp_dir))
     }
 
@@ -236,69 +273,69 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_append_read() -> Result<()> {
-        let (mut log, _tmpdir) = create_log()?;
+    #[tokio::test]
+    async fn test_append_read() -> Result<()> {
+        let (mut log, _tmpdir) = create_log().await?;
         let record = create_record();
-        let off = log.append(record.clone())?;
+        let off = log.append(record.clone()).await?;
         assert_eq!(off, 0);
-        let read = log.read(off)?;
+        let read = log.read(off).await?;
         assert_eq!(read.value, record.value);
         Ok(())
     }
 
-    #[test]
-    fn test_out_of_range() -> Result<()> {
-        let (mut log, _) = create_log()?;
-        let_assert!(Err(_) = log.read(1));
+    #[tokio::test]
+    async fn test_out_of_range() -> Result<()> {
+        let (mut log, _) = create_log().await?;
+        let_assert!(Err(_) = log.read(1).await);
         Ok(())
     }
 
-    #[test]
-    fn test_init_existing() -> Result<()> {
-        let (mut log, _tmpdir) = create_log()?;
+    #[tokio::test]
+    async fn test_init_existing() -> Result<()> {
+        let (mut log, _tmpdir) = create_log().await?;
         let record = create_record();
         let mut i = 0;
         while i < 3 {
-            log.append(record.clone())?;
+            log.append(record.clone()).await?;
             i += 1;
         }
-        let off = log.lowest_offset()?;
+        let off = log.lowest_offset().await?;
         assert_eq!(off, 0);
-        let off = log.highest_offset()?;
+        let off = log.highest_offset().await?;
         assert_eq!(off, 2);
-        log = Log::new(log.dir, log.config)?;
-        let off = log.lowest_offset()?;
+        log = Log::new(log.dir, log.config).await?;
+        let off = log.lowest_offset().await?;
         assert_eq!(off, 0);
-        let off = log.highest_offset()?;
+        let off = log.highest_offset().await?;
         assert_eq!(off, 2);
         Ok(())
     }
 
-    #[test]
-    fn test_reader() -> Result<()> {
-        let (mut log, _tmpdir) = create_log()?;
+    #[tokio::test]
+    async fn test_reader() -> Result<()> {
+        let (mut log, _tmpdir) = create_log().await?;
         let record = create_record();
-        let off = log.append(record.clone())?;
+        let off = log.append(record.clone()).await?;
         assert_eq!(off, 0);
-        let mut reader = log.reader()?;
+        let mut reader = log.reader().await?;
         let b = reader.read_all()?;
         let read: Record = serde_json::from_slice(&b[LEN_WIDTH..])?;
         assert_eq!(read.value, record.value);
         Ok(())
     }
 
-    #[test]
-    fn test_truncate() -> Result<()> {
-        let (mut log, _tmpdir) = create_log()?;
+    #[tokio::test]
+    async fn test_truncate() -> Result<()> {
+        let (mut log, _tmpdir) = create_log().await?;
         let record = create_record();
         let mut i = 0;
         while i < 3 {
-            log.append(record.clone())?;
+            log.append(record.clone()).await?;
             i += 1;
         }
-        log.truncate(0)?;
-        let_assert!(Err(_) = log.read(0));
+        log.truncate(0).await?;
+        let_assert!(Err(_) = log.read(0).await);
         Ok(())
     }
 }
