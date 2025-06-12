@@ -8,6 +8,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::sync::Mutex;
 use tokio_stream::{wrappers::ReceiverStream, StreamExt};
+use tonic::transport::ServerTlsConfig;
 use tonic::Streaming;
 use tonic::{transport::server::Router, transport::Server, Request, Response, Status};
 
@@ -41,11 +42,16 @@ pub trait CommitLog: Send + Sync + 'static {
     async fn read(&mut self, offset: u64) -> anyhow::Result<Record>;
 }
 
-pub async fn new_grpc_server(commit_log: impl CommitLog + 'static) -> anyhow::Result<Router> {
+pub async fn new_grpc_server(
+    commit_log: impl CommitLog + 'static,
+    tls_config: ServerTlsConfig,
+) -> anyhow::Result<Router> {
     let config = ServerConfig::new(commit_log);
     let srv = LogServerService::new(config);
     let service = LogServer::new(srv);
-    let server = Server::builder().add_service(service);
+    let server = Server::builder()
+        .tls_config(tls_config)?
+        .add_service(service);
     Ok(server)
 }
 
@@ -175,6 +181,7 @@ mod tests {
     use anyhow::Result;
     use assert2::check;
     use assert2::let_assert;
+    use rcgen::{generate_simple_self_signed, CertifiedKey};
     use std::net::SocketAddr;
     use std::net::TcpListener;
     use tempfile::{tempdir, TempDir};
@@ -182,7 +189,7 @@ mod tests {
     use tokio::sync::oneshot;
     use tokio::task::JoinHandle;
     use tokio_stream::{wrappers::ReceiverStream, StreamExt};
-    use tonic::transport::Channel;
+    use tonic::transport::{Certificate, Channel, ClientTlsConfig, Identity, ServerTlsConfig};
     use tonic::Request;
 
     struct TestSetup {
@@ -198,6 +205,11 @@ mod tests {
             let port = get_random_port()?;
             let addr = SocketAddr::new("127.0.0.1".parse()?, port);
 
+            let subject_alt_names =
+                vec!["hello.world.example".to_string(), "localhost".to_string()];
+
+            let CertifiedKey { cert, key_pair } =
+                generate_simple_self_signed(subject_alt_names).unwrap();
             let temp_dir = tempdir()?;
             let dir = temp_dir.path().to_path_buf();
 
@@ -205,7 +217,9 @@ mod tests {
             let clog = Log::new((dir.to_string_lossy()).to_string(), cfg).await?;
 
             let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
-            let server = new_grpc_server(clog).await?;
+            let tls_config = ServerTlsConfig::new()
+                .identity(Identity::from_pem(cert.pem(), key_pair.serialize_pem()));
+            let server = new_grpc_server(clog, tls_config).await?;
             let server_handle = tokio::spawn(async move {
                 server
                     .serve_with_shutdown(addr, async {
@@ -215,7 +229,14 @@ mod tests {
             });
 
             let _ = tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            let client = LogClient::connect(format!("http://{}", addr)).await?;
+            let client_tls_config =
+                ClientTlsConfig::new().ca_certificate(Certificate::from_pem(cert.pem()));
+            let endpoint = format!("https://localhost:{}", port);
+            let channel = Channel::from_shared(endpoint)?
+                .tls_config(client_tls_config)?
+                .connect()
+                .await?;
+            let client = LogClient::new(channel);
             Ok(TestSetup {
                 client,
                 server_handle,
