@@ -166,4 +166,171 @@ impl Log for LogServerService {
 }
 
 #[cfg(test)]
-mod tests {}
+mod tests {
+    use super::new_grpc_server;
+    use crate::api::v1::log_client::LogClient;
+    use crate::api::v1::{ConsumeRequest, ProduceRequest, Record};
+    use crate::internal::log::config::Config;
+    use crate::internal::log::Log;
+    use anyhow::Result;
+    use assert2::check;
+    use assert2::let_assert;
+    use std::net::SocketAddr;
+    use std::net::TcpListener;
+    use tempfile::{tempdir, TempDir};
+    use tokio::sync::mpsc;
+    use tokio::sync::oneshot;
+    use tokio::task::JoinHandle;
+    use tokio_stream::{wrappers::ReceiverStream, StreamExt};
+    use tonic::transport::Channel;
+    use tonic::Request;
+
+    struct TestSetup {
+        client: LogClient<Channel>,
+        server_handle: JoinHandle<Result<(), tonic::transport::Error>>,
+        temp_dir: TempDir,
+        addr: SocketAddr,
+        shutdown_tx: Option<oneshot::Sender<()>>,
+    }
+
+    impl TestSetup {
+        async fn new() -> Result<TestSetup> {
+            let port = get_random_port()?;
+            let addr = SocketAddr::new("127.0.0.1".parse()?, port);
+
+            let temp_dir = tempdir()?;
+            let dir = temp_dir.path().to_path_buf();
+
+            let cfg = Config::default();
+            let clog = Log::new((dir.to_string_lossy()).to_string(), cfg).await?;
+
+            let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+            let server = new_grpc_server(clog).await?;
+            let server_handle = tokio::spawn(async move {
+                server
+                    .serve_with_shutdown(addr, async {
+                        shutdown_rx.await.unwrap_or(());
+                    })
+                    .await
+            });
+
+            let _ = tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            let client = LogClient::connect(format!("http://{}", addr)).await?;
+            Ok(TestSetup {
+                client,
+                server_handle,
+                temp_dir,
+                addr,
+                shutdown_tx: Some(shutdown_tx),
+            })
+        }
+    }
+
+    impl Drop for TestSetup {
+        fn drop(&mut self) {
+            if let Some(shutdown_tx) = self.shutdown_tx.take() {
+                let _ = shutdown_tx.send(());
+            }
+        }
+    }
+
+    fn create_record(value: Vec<u8>, offset: u64) -> Record {
+        Record { value, offset }
+    }
+
+    fn get_random_port() -> std::io::Result<u16> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        Ok(addr.port())
+    }
+
+    #[tokio::test]
+    async fn test_produce_consume() -> Result<()> {
+        let mut test = TestSetup::new().await?;
+        let record = create_record("hello world".into(), 0);
+        let request = Request::new(ProduceRequest {
+            record: Some(record.clone()),
+        });
+        let produce = test.client.produce(request).await?;
+        let consume_req = Request::new(ConsumeRequest {
+            offset: produce.into_inner().offset,
+        });
+        let consume_res = test.client.consume(consume_req).await?;
+        let consume = consume_res.into_inner().record.unwrap();
+        assert_eq!(consume.value, record.value);
+        assert_eq!(consume.offset, record.offset);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_consume_past_boundry() -> Result<()> {
+        let mut test = TestSetup::new().await?;
+        let record = create_record("hello world".into(), 0);
+        let produce_req = Request::new(ProduceRequest {
+            record: Some(record.clone()),
+        });
+        let produce = test.client.produce(produce_req).await?;
+        let consume_req = Request::new(ConsumeRequest {
+            offset: produce.into_inner().offset + 1,
+        });
+        let_assert!(Err(_) = test.client.consume(consume_req).await);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_produce_consume_stream() -> Result<()> {
+        let mut test = TestSetup::new().await?;
+        let messages = ["message1", "message2"];
+        let records: Vec<Record> = messages
+            .iter()
+            .enumerate()
+            .map(|(i, x)| create_record((*x).into(), i as u64))
+            .collect();
+
+        {
+            let (tx, rx) = mpsc::channel(1000);
+            let stream_req = ReceiverStream::new(rx);
+            let mut stream = test.client.produce_stream(stream_req).await?.into_inner();
+            for rec in records.clone() {
+                let req = ProduceRequest {
+                    record: Some(rec.clone()),
+                };
+                tx.send(req).await?;
+                let res = stream.next().await;
+                let_assert!(Ok(r) = res.clone().unwrap());
+                check!(
+                    r.offset == rec.offset,
+                    "Wanted offset: {}, got: {}",
+                    rec.offset,
+                    r.offset
+                );
+            }
+        }
+        {
+            let (tx, rx) = mpsc::channel(1000);
+            let _stream = ReceiverStream::new(rx);
+            let req = ConsumeRequest { offset: 0 };
+            let mut stream = test.client.consume_stream(req).await?.into_inner();
+            for rec in records {
+                tx.send(req).await?;
+                let res = stream.next().await;
+                let_assert!(Ok(r) = res.clone().unwrap());
+                let_assert!(Some(record) = r.record);
+                check!(
+                    record.offset == rec.offset,
+                    "Wanted offset: {}, got: {}",
+                    rec.offset,
+                    record.offset,
+                );
+                check!(
+                    record.value == rec.value,
+                    "Wanted value: {}, got: {}",
+                    String::from_utf8(rec.value.clone())?,
+                    String::from_utf8(record.value.clone())?,
+                );
+            }
+        }
+        Ok(())
+    }
+}

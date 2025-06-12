@@ -19,7 +19,7 @@ use config::Config;
 use segment::Segment;
 use store::Store;
 
-struct Log {
+pub struct Log {
     dir: String,
     config: Config,
     active_segment: Option<Arc<Mutex<Segment>>>,
@@ -205,16 +205,16 @@ impl Log {
     }
 }
 
-struct OriginReader {
+pub struct OriginReader {
     store: Arc<SyncMutex<Store>>,
     off: u64,
 }
 
 impl OriginReader {
-    fn new(store: Arc<SyncMutex<Store>>, off: u64) -> OriginReader {
+    pub fn new(store: Arc<SyncMutex<Store>>, off: u64) -> OriginReader {
         OriginReader { store, off }
     }
-    fn read(&mut self, p: &mut [u8]) -> Result<usize> {
+    pub fn read(&mut self, p: &mut [u8]) -> Result<usize> {
         let mut store = self.store.lock().map_err(|e| anyhow!(e.to_string()))?;
         let n = &store.read_at(p, self.off)?;
         self.off += *n as u64;
@@ -222,16 +222,16 @@ impl OriginReader {
     }
 }
 
-struct MultiReader {
+pub struct MultiReader {
     readers: Vec<OriginReader>,
 }
 
 impl MultiReader {
-    fn new(readers: Vec<OriginReader>) -> MultiReader {
+    pub fn new(readers: Vec<OriginReader>) -> MultiReader {
         MultiReader { readers }
     }
 
-    fn read_all(&mut self) -> Result<Vec<u8>> {
+    pub fn read_all(&mut self) -> Result<Vec<u8>> {
         let mut b = [0u8; 1024];
         let mut bytes_read: usize = 0;
         self.readers.iter_mut().for_each(|r| {
