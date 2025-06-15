@@ -20,6 +20,9 @@ prost-helper = "0.1"
 async-trait = "0.1.88"
 tokio-stream = "0.1.17"
 rustls = { version = "0.23.27" }
+dirs = "5.0"
+rustls-pemfile = "2.2"
+webpki-roots = "0.25"
 
 [build-dependencies]
 tonic-build = "0.13.1"

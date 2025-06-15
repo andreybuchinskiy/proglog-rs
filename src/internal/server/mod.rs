@@ -176,12 +176,13 @@ mod tests {
     use super::new_grpc_server;
     use crate::api::v1::log_client::LogClient;
     use crate::api::v1::{ConsumeRequest, ProduceRequest, Record};
+    use crate::internal::config::files::{config_file, CA_FILE, SERVER_CERT_FILE, SERVER_KEY_FILE};
+    use crate::internal::config::tls::{setup_client_tls_config, setup_server_tls_config};
     use crate::internal::log::config::Config;
     use crate::internal::log::Log;
     use anyhow::Result;
     use assert2::check;
     use assert2::let_assert;
-    use rcgen::{generate_simple_self_signed, CertifiedKey};
     use std::net::SocketAddr;
     use std::net::TcpListener;
     use tempfile::{tempdir, TempDir};
@@ -189,7 +190,7 @@ mod tests {
     use tokio::sync::oneshot;
     use tokio::task::JoinHandle;
     use tokio_stream::{wrappers::ReceiverStream, StreamExt};
-    use tonic::transport::{Certificate, Channel, ClientTlsConfig, Identity, ServerTlsConfig};
+    use tonic::transport::Channel;
     use tonic::Request;
 
     struct TestSetup {
@@ -205,11 +206,6 @@ mod tests {
             let port = get_random_port()?;
             let addr = SocketAddr::new("127.0.0.1".parse()?, port);
 
-            let subject_alt_names =
-                vec!["hello.world.example".to_string(), "localhost".to_string()];
-
-            let CertifiedKey { cert, key_pair } =
-                generate_simple_self_signed(subject_alt_names).unwrap();
             let temp_dir = tempdir()?;
             let dir = temp_dir.path().to_path_buf();
 
@@ -217,9 +213,11 @@ mod tests {
             let clog = Log::new((dir.to_string_lossy()).to_string(), cfg).await?;
 
             let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
-            let tls_config = ServerTlsConfig::new()
-                .identity(Identity::from_pem(cert.pem(), key_pair.serialize_pem()));
-            let server = new_grpc_server(clog, tls_config).await?;
+            let server_tls_config = setup_server_tls_config(
+                config_file(SERVER_CERT_FILE),
+                config_file(SERVER_KEY_FILE),
+            )?;
+            let server = new_grpc_server(clog, server_tls_config).await?;
             let server_handle = tokio::spawn(async move {
                 server
                     .serve_with_shutdown(addr, async {
@@ -229,8 +227,7 @@ mod tests {
             });
 
             let _ = tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            let client_tls_config =
-                ClientTlsConfig::new().ca_certificate(Certificate::from_pem(cert.pem()));
+            let client_tls_config = setup_client_tls_config(config_file(CA_FILE))?;
             let endpoint = format!("https://localhost:{}", port);
             let channel = Channel::from_shared(endpoint)?
                 .tls_config(client_tls_config)?
