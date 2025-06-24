@@ -9,10 +9,8 @@ pub mod api {
     }
 }
 
-use internal::server::http::new_http_server;
-
 #[tokio::main]
 async fn main() -> Result<()> {
-    new_http_server("127.0.0.1:8080").await?;
+    // new_grpc_server("127.0.0.1:8080").await?;
     Ok(())
 }

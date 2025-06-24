@@ -61,7 +61,6 @@ impl CommitLog for Log {
     }
 }
 
-// #[async_trait]
 impl Log {
     pub async fn new(dir: String, mut config: Config) -> Result<Log> {
         if config.segment.max_store_bytes == 0 {

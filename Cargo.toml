@@ -7,7 +7,6 @@ edition = "2024"
 axum = "0.7"
 serde_json = "1.0"
 tokio = { version = "1.0", features = ["full"] }
-hyper = "1.6.0"
 serde = { version = "1.0.219", features = ["derive"] }
 anyhow = "1.0.98"
 base64 = "0.22.1"
@@ -16,13 +15,21 @@ prost = "0.13.5"
 byteorder = "1.5.0"
 tempfile = "3.20.0"
 memmap2 = "0.9.5"
-prost-helper = "0.1"
 async-trait = "0.1.88"
 tokio-stream = "0.1.17"
 rustls = { version = "0.23.27" }
 dirs = "5.0"
-rustls-pemfile = "2.2"
-webpki-roots = "0.25"
+casbin = "2.10.1"
+tower = "0.5.2"
+tower-http = "0.6.6"
+pin-project = "1.1.10"
+futures = "0.3.31"
+x509-parser = "0.17.0"
+tower-layer = "0.3.3"
+tower-async = { version = "0.2", features = ["full"] }
+tower-async-service = "0.2.0"
+tower-async-layer = "0.2.0"
+http = "1"
 
 [build-dependencies]
 tonic-build = "0.13.1"
@@ -34,3 +41,6 @@ serde = { version = "1.0.219", features = ["derive"] }
 assert2 = "0.3"
 tonic-mock = "0.4.0"
 rcgen = "0.13"
+
+[profile.release]
+debug = true
